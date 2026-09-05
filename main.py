@@ -2,20 +2,26 @@ from fastapi import FastAPI, HTTPException
 import subprocess
 import asyncio
 import json
-import sys
 import re
 
 app = FastAPI(title="컴시간 시간표 API")
 
 def run_node_script(node_script: str):
-    """Windows asyncio 이슈를 피하기 위한 동기 프로세스 실행 함수"""
+    """
+    Render(Linux) 및 Windows 환경 모두에서 Node.js 스크립트를 안정적으로 실행.
+    stdout과 stderr를 함께 수집하여 에러 발생 원인을 명확하게 전달합니다.
+    """
     result = subprocess.run(
-        [sys.executable, "-c", f"import subprocess; print(subprocess.check_output(['node', '-e', {repr(node_script)}]).decode('utf-8'))"],
+        ["node", "-e", node_script],
         capture_output=True,
         text=True,
-        shell=True
+        encoding="utf-8",
+        errors="ignore",
+        shell=False
     )
-    return result.stdout, result.stderr
+    stdout_res = result.stdout.strip() if result.stdout else ""
+    stderr_res = result.stderr.strip() if result.stderr else ""
+    return stdout_res, stderr_res
 
 @app.get("/")
 def read_root():
@@ -33,11 +39,13 @@ async def get_timetable(
     const timetable = new Timetable();
 
     async function run() {{
-        await timetable.init({{ cache: 1000 * 60 * 60 }});
+        await timetable.init({{ cache: 1000 * 60 * 30 }});
         
         const schoolList = await timetable.search('{school_name}');
         if (!schoolList || schoolList.length === 0) {{
+            console.log("---JSON_START---");
             console.log(JSON.stringify({{ error: "해당 학교를 찾을 수 없습니다." }}));
+            console.log("---JSON_END---");
             return;
         }}
 
@@ -76,21 +84,21 @@ async def get_timetable(
     """
 
     try:
-        # 별도 스레드에서 안전하게 동기 subprocess 실행 (NotImplementedError 완벽 방지)
+        # 이벤트 루프에서 동기 subprocess 실행
         loop = asyncio.get_event_loop()
         stdout, stderr = await loop.run_in_executor(None, run_node_script, node_script)
 
-        raw_stdout = stdout.strip()
+        # Node.js 내부 에러 또는 모듈 로딩 실패 처리
+        if stderr and "Error" in stderr and not stdout:
+            raise HTTPException(status_code=500, detail=f"Node 실행 에러: {stderr}")
 
-        if stderr and "Error" in stderr and not raw_stdout:
-            raise HTTPException(status_code=500, detail=f"Node 실행 오류: {stderr.strip()}")
+        if not stdout:
+            detail_msg = f"Node.js 응답이 비어있습니다. (stderr: {stderr})" if stderr else "Node.js 응답 데이터가 비어 있습니다."
+            raise HTTPException(status_code=500, detail=detail_msg)
 
-        if not raw_stdout:
-            raise HTTPException(status_code=500, detail="Node.js 응답 데이터가 비어 있습니다.")
-
-        match = re.search(r'---JSON_START---\s*(\{.*?\})\s*---JSON_END---', raw_stdout, re.DOTALL)
+        match = re.search(r'---JSON_START---\s*(\{.*?\})\s*---JSON_END---', stdout, re.DOTALL)
         if not match:
-            raise HTTPException(status_code=500, detail=f"Node.js 출력 파싱 실패: {raw_stdout}")
+            raise HTTPException(status_code=500, detail=f"Node.js 출력 파싱 실패: {stdout}")
 
         json_str = match.group(1)
         output = json.loads(json_str)
@@ -100,7 +108,7 @@ async def get_timetable(
 
         timetable_data = output["timetable"]
 
-        # 특정 학년/반 파싱
+        # 특정 학년/반 필터링
         if grade is not None and class_num is not None:
             grade_data = timetable_data.get(grade) or timetable_data.get(str(grade))
             if not grade_data:
