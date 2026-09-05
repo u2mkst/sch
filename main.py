@@ -1,22 +1,36 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import Response
 import subprocess
 import asyncio
 import json
 import re
+import os
 
 app = FastAPI(title="컴시간 시간표 API")
 
 def run_node_script(node_script: str):
     """
-    Render(Linux) 및 Windows 환경 모두에서 Node.js 스크립트를 안정적으로 실행.
-    stdout과 stderr를 함께 수집하여 에러 발생 원인을 명확하게 전달합니다.
+    Linux(Render) 및 Windows 환경 모두에서 Node.js 바이너리를 안정적으로 실행.
+    stdout과 stderr를 수집하여 에러 원인을 명확하게 전달합니다.
     """
+    env = os.environ.copy()
+    
+    # Render Linux 환경에서 node 바이너리 경로 보장
+    extra_paths = [
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/opt/render/project/src/node_modules/.bin"
+    ]
+    env["PATH"] = os.pathsep.join(extra_paths) + os.pathsep + env.get("PATH", "")
+
     result = subprocess.run(
         ["node", "-e", node_script],
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="ignore",
+        env=env,
         shell=False
     )
     stdout_res = result.stdout.strip() if result.stdout else ""
@@ -26,6 +40,11 @@ def run_node_script(node_script: str):
 @app.get("/")
 def read_root():
     return {"status": "ok", "message": "시간표 API 서버가 정상 작동 중입니다."}
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    # 브라우저 자동 파비콘 요청 시 404 로그 방지
+    return Response(content=b"", media_type="image/x-icon")
 
 @app.get("/timetable/{school_name}")
 async def get_timetable(
@@ -39,7 +58,8 @@ async def get_timetable(
     const timetable = new Timetable();
 
     async function run() {{
-        await timetable.init({{ cache: 1000 * 60 * 30 }});
+        // 메모리 절약 및 응답속도 향상을 위해 캐시 옵션 지정
+        await timetable.init({{ cache: 1000 * 60 * 10 }});
         
         const schoolList = await timetable.search('{school_name}');
         if (!schoolList || schoolList.length === 0) {{
@@ -88,7 +108,6 @@ async def get_timetable(
         loop = asyncio.get_event_loop()
         stdout, stderr = await loop.run_in_executor(None, run_node_script, node_script)
 
-        # Node.js 내부 에러 또는 모듈 로딩 실패 처리
         if stderr and "Error" in stderr and not stdout:
             raise HTTPException(status_code=500, detail=f"Node 실행 에러: {stderr}")
 
